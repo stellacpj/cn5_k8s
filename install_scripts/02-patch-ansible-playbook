@@ -1,0 +1,79 @@
+#!/bin/bash
+
+###############################################
+## fix the swift-ring-builder image variable ##
+###############################################
+sed -i "s/{{ docker_namespace }}/{{ docker_registry ~ '\/' if docker_registry else '' }}{{ docker_namespace }}/" \
+~/contrail-kolla-ansible/ansible/roles/swift/templates/swift-ring-builder.sh.j2
+
+## fix the UPDATE_IMAGES checking error ##
+##########################################
+sed -i 's/UPDATE_IMAGES != false/UPDATE_IMAGES |bool/' \
+~/contrail-ansible-deployer/playbooks/roles/install_contrail/tasks/*.yml
+
+
+####################################
+## add task for create ifcfg_eth1 ##
+####################################
+sed -i '171 a \
+- name: create ifcfg_eth1 file\
+  copy:\
+    content: "DEVICE=eth1\\nIPADDR={{ item.value.data_ip }}\\nNETMASK={{ provider_data.data_subnet_netmask }}\\nONBOOT=yes"\
+    dest: "/tmp/ifcfg_eth1_{{ container_vm_hostname }}"\
+  when: item.value.data_ip |d\
+' \
+~/contrail-ansible-deployer/playbooks/roles/create_kvm_instances/tasks/build_and_start_container_hosts.yml
+
+###################################################
+## add upload ifcfg_eth1 in virt-customize.sh.j2 ##
+###################################################
+sed -i '20 a \
+{% if item.value.data_ip |d %}\
+--upload /tmp/ifcfg_eth1_{{ container_vm_hostname }}:/etc/sysconfig/network-scripts/ifcfg-eth1 \\\
+{% endif %}' \
+~/contrail-ansible-deployer/playbooks/roles/create_kvm_instances/templates/virt-customize.sh.j2
+
+###############################
+## create virt-install.sh.j2 ##
+###############################
+cat > ~/contrail-ansible-deployer/playbooks/roles/create_kvm_instances/templates/virt-install.sh.j2 <<EOF
+virt-install --name {{ container_vm_hostname }} \\
+--disk /var/lib/libvirt/images/{{ container_vm_hostname }}.qcow2 \\
+--cpu host-passthrough \\
+--vcpus={{ vcpu }} \\
+--ram={{ vram }} \\
+--network network={{ item.value.bridge.0 }},model=virtio \\
+{% if item.value.data_ip |d %}
+--network network={{ item.value.bridge.1 }},model=virtio \\
+{% endif %}
+--virt-type kvm \\
+--import \\
+--os-variant rhel7 \\
+--graphics vnc \\
+--serial pty \\
+--noautoconsole \\
+--console pty,target_type=virtio
+EOF
+
+##############################
+## update virt-install task ##
+##############################
+sed -i -e '194,209s/^/#/' \
+-e '193 a \
+- name: copy virt-install\
+  template:\
+    src: virt-install.sh.j2\
+    dest: /tmp/virt-install.sh\
+    mode: 0700\
+\
+- name: run virt-install\
+  shell: /tmp/virt-install.sh\
+' \
+~/contrail-ansible-deployer/playbooks/roles/create_kvm_instances/tasks/build_and_start_container_hosts.yml
+
+##################################################
+## modify /etc/hosts rules for KVM installation ##
+##################################################
+sed -i '77s/^/#/' \
+~/contrail-ansible-deployer/playbooks/roles/configure_instances/tasks/install_software.yml
+
